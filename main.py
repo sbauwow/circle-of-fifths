@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (
 )
 
 from theory import (
-    KEY_SIGNATURES, MODE_NAMES, PROGRESSIONS, TUNING_NAMES, TUNINGS, Scale,
+    CAGED_TUNINGS, KEY_SIGNATURES, MODE_NAMES, PROGRESSIONS, TUNING_NAMES,
+    TUNINGS, Scale,
 )
 from circle_widget import CircleOfFifthsWidget
 from fretboard_widget import FretboardWidget
@@ -142,6 +143,28 @@ class MainWindow(QMainWindow):
         self.degree_check = QCheckBox("Show Degrees")
         layout.addWidget(self.degree_check)
 
+        layout.addSpacing(15)
+
+        # CAGED overlay
+        self.caged_check = QCheckBox("CAGED")
+        layout.addWidget(self.caged_check)
+        self.caged_combo = QComboBox()
+        self.caged_combo.addItems(["All", "C", "A", "G", "E", "D"])
+        self.caged_combo.setVisible(False)
+        layout.addWidget(self.caged_combo)
+
+        layout.addSpacing(15)
+
+        # Slide mode
+        self.slide_check = QCheckBox("Slide")
+        layout.addWidget(self.slide_check)
+
+        layout.addSpacing(15)
+
+        # Fingerstyle mode
+        self.fingerstyle_check = QCheckBox("Fingerstyle")
+        layout.addWidget(self.fingerstyle_check)
+
         layout.addStretch()
         return bar
 
@@ -158,6 +181,13 @@ class MainWindow(QMainWindow):
         self.tuning_combo.currentTextChanged.connect(self._on_tuning_changed)
         # Degrees -> Fretboard
         self.degree_check.toggled.connect(self.fretboard.set_show_degrees)
+        # CAGED -> Fretboard
+        self.caged_check.toggled.connect(self._on_caged_toggled)
+        self.caged_combo.currentTextChanged.connect(self._on_caged_shape_changed)
+        # Slide -> Fretboard
+        self.slide_check.toggled.connect(self.fretboard.set_slide_mode)
+        # Fingerstyle -> Fretboard
+        self.fingerstyle_check.toggled.connect(self.fretboard.set_fingerstyle)
 
     def _on_scale_changed(self, scale: Scale):
         self.fretboard.set_scale(scale)
@@ -191,6 +221,24 @@ class MainWindow(QMainWindow):
         tuning = TUNINGS.get(name)
         if tuning:
             self.fretboard.set_tuning(tuning)
+        # CAGED only valid for standard-interval tunings
+        supported = name in CAGED_TUNINGS
+        self.caged_check.setEnabled(supported)
+        if not supported:
+            self.caged_check.setChecked(False)
+
+    def _on_caged_toggled(self, checked: bool):
+        self.caged_combo.setVisible(checked)
+        if not checked:
+            self.caged_combo.setCurrentIndex(0)
+        shape = None if not checked or self.caged_combo.currentText() == "All" else self.caged_combo.currentText()
+        self.fretboard.set_caged(checked, shape)
+
+    def _on_caged_shape_changed(self, text: str):
+        if not self.caged_check.isChecked():
+            return
+        shape = None if text == "All" else text
+        self.fretboard.set_caged(True, shape)
 
 
 def main():

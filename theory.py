@@ -260,6 +260,8 @@ TUNINGS = {
     "Open G (DGDGBD)":     GuitarTuning("Open G",         [38, 43, 50, 55, 59, 62]),
     "Open D (DADF#AD)":    GuitarTuning("Open D",         [38, 45, 50, 54, 57, 62]),
     "Half Step Down":      GuitarTuning("Eb Standard",    [39, 44, 49, 54, 58, 63]),
+    "Open E (EBEG#BE)":    GuitarTuning("Open E",         [40, 47, 52, 56, 59, 64]),
+    "Open A (EAEAC#E)":    GuitarTuning("Open A",         [40, 45, 52, 57, 61, 64]),
 }
 
 TUNING_NAMES = list(TUNINGS.keys())
@@ -273,3 +275,125 @@ def note_at_fret(open_pitch: int, fret: int) -> int:
 def note_name_at_fret(open_pitch: int, fret: int, use_flats: bool = False) -> str:
     pc = note_at_fret(open_pitch, fret)
     return (CHROMATIC_FLATS if use_flats else CHROMATIC_SHARPS)[pc]
+
+
+# ---------------------------------------------------------------------------
+# CAGED System
+# ---------------------------------------------------------------------------
+
+CAGED_COLORS = {
+    "C": "#ef5350",
+    "A": "#ffa726",
+    "G": "#66bb6a",
+    "E": "#42a5f5",
+    "D": "#ab47bc",
+}
+
+CAGED_TUNINGS = {"Standard (EADGBE)", "Half Step Down"}
+
+
+def get_caged_zones(
+    root_pc: int,
+    tuning_pitches: list[int],
+) -> list[tuple[str, float]]:
+    """Return CAGED shape zones as (name, center_fret) sorted by center.
+
+    Uses anchor frets on strings 0 (low E), 1 (A), and 2 (D) to compute
+    a center fret for each shape.  Generates at base and +12 offsets to
+    cover the full 15-fret range.
+    """
+    anchor_E = (root_pc - tuning_pitches[0] % 12) % 12
+    anchor_A = (root_pc - tuning_pitches[1] % 12) % 12
+    anchor_D = (root_pc - tuning_pitches[2] % 12) % 12
+
+    shape_centers = {
+        "C": anchor_A - 1,
+        "A": anchor_A + 2,
+        "G": anchor_E - 2,
+        "E": anchor_E + 0.5,
+        "D": anchor_D + 1,
+    }
+
+    zones: list[tuple[str, float]] = []
+    for name, base in shape_centers.items():
+        for offset in (0, 12):
+            center = base + offset
+            if -2 <= center <= 17:
+                zones.append((name, center))
+
+    zones.sort(key=lambda z: z[1])
+    return zones
+
+
+def assign_caged_shape(fret: int, zones: list[tuple[str, float]]) -> str:
+    """Return the CAGED shape name whose center is nearest to *fret*."""
+    best_name = zones[0][0]
+    best_dist = abs(fret - zones[0][1])
+    for name, center in zones[1:]:
+        dist = abs(fret - center)
+        if dist < best_dist:
+            best_dist = dist
+            best_name = name
+    return best_name
+
+
+# ---------------------------------------------------------------------------
+# Slide Guitar — Chord Identification
+# ---------------------------------------------------------------------------
+
+CHORD_TEMPLATES: dict[str, set[int]] = {
+    "":     {0, 4, 7},
+    "m":    {0, 3, 7},
+    "7":    {0, 4, 7, 10},
+    "m7":   {0, 3, 7, 10},
+    "maj7": {0, 4, 7, 11},
+    "dim":  {0, 3, 6},
+    "aug":  {0, 4, 8},
+    "sus4": {0, 5, 7},
+    "sus2": {0, 2, 7},
+    "6":    {0, 4, 7, 9},
+}
+
+
+def identify_chord(pitches: list[int]) -> str:
+    """Identify what chord 6 MIDI pitches form.
+
+    Returns e.g. "C", "Am", "G7/B", or "?" if no match.
+    """
+    unique_pcs = {p % 12 for p in pitches}
+    bass_pc = pitches[0] % 12
+
+    best: tuple[int, str, int, int] | None = None  # (score, name, root, extra)
+
+    for root_pc in unique_pcs:
+        intervals = {(pc - root_pc) % 12 for pc in unique_pcs}
+        for suffix, template in CHORD_TEMPLATES.items():
+            if not template.issubset(intervals):
+                continue
+            extra = len(intervals) - len(template)
+            score = 0
+            if root_pc == bass_pc:
+                score += 5
+            # Prefer simpler templates (fewer notes = fewer extra)
+            score -= extra
+            # Prefer simpler quality (fewer template notes)
+            score -= len(template)
+            if best is None or score > best[0]:
+                best = (score, suffix, root_pc, extra)
+
+    if best is None:
+        return "?"
+
+    _, suffix, root_pc, _ = best
+    root_name = CHROMATIC_SHARPS[root_pc]
+    chord_name = root_name + suffix
+
+    # Only show slash notation when bass is NOT a chord tone
+    if root_pc != bass_pc:
+        template = CHORD_TEMPLATES[suffix]
+        bass_interval = (bass_pc - root_pc) % 12
+        if bass_interval not in template:
+            bass_name = CHROMATIC_SHARPS[bass_pc]
+            chord_name += "/" + bass_name
+
+    return chord_name
