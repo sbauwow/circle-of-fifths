@@ -1,0 +1,100 @@
+name: Release desktop builds
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-22.04
+            asset: CircleOfFifths-linux-x86_64.tar.gz
+          - platform: Windows x86_64
+            os: windows-latest
+            asset: CircleOfFifths-windows-x86_64.zip
+          - platform: macOS
+            os: macos-latest
+            asset: CircleOfFifths-macos.zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -s test -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Build application
+        run: >-
+          python -m PyInstaller --clean --noconfirm --onefile --windowed
+          --name CircleOfFifths main.py
+
+      - name: Package Linux build
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf "${{ matrix.asset }}" CircleOfFifths
+
+      - name: Package Windows build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/CircleOfFifths.exe -DestinationPath "${{ matrix.asset }}"
+
+      - name: Package macOS build
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/CircleOfFifths.app "${{ matrix.asset }}"
+
+      - name: Store release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --verify-tag \
+              --title "Circle of Fifths $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

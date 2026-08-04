@@ -4,6 +4,12 @@ A guitar-focused PySide6 harmony explorer. Select a major or minor key on the
 circle, change modes, inspect correctly spelled diatonic chords, and project a
 scale or selected chord onto the fretboard.
 
+## Download
+
+Standalone desktop builds are published on the
+[GitHub Releases](https://github.com/sbauwow/circle-of-fifths/releases) page.
+Linux, Windows, and macOS packages are attached to each versioned release.
+
 ## Run
 
 ```sh
