@@ -7,8 +7,8 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from theory import (
-    CAGED_COLORS, CAGED_TUNINGS, CHROMATIC_FLATS, CHROMATIC_SHARPS,
-    DEGREE_LABELS, GuitarTuning, Scale, TUNINGS,
+    CAGED_COLORS, CHROMATIC_SHARPS, DEGREE_LABELS, Chord, GuitarTuning,
+    Scale, TUNINGS,
     assign_caged_shape, get_caged_zones, identify_chord, note_at_fret,
 )
 
@@ -31,6 +31,8 @@ COL_SLIDE_NOTE = "#e0e0e0"
 COL_SLIDE_BAR = "#ffffff"
 COL_FINGERSTYLE_SEP = "#5c6bc0"
 COL_PIMA = "#ffcc80"
+COL_CAPO = "#d7dde5"
+COL_BLOCKED = "#10101d"
 
 NUM_FRETS = 15
 SINGLE_MARKERS = {3, 5, 7, 9, 15}
@@ -49,17 +51,24 @@ class FretboardWidget(QWidget):
 
         self._tuning: GuitarTuning = TUNINGS["Standard (EADGBE)"]
         self._scale: Scale | None = None
+        self._active_chord: Chord | None = None
         self._show_degrees: bool = False
         self._caged_enabled: bool = False
         self._caged_shape: str | None = None  # None = "All"
         self._slide_mode: bool = False
         self._slide_fret: int | None = None
         self._fingerstyle: bool = False
+        self._capo_fret: int = 0
 
     # -- Public API ----------------------------------------------------------
 
     def set_scale(self, scale: Scale | None):
         self._scale = scale
+        self._active_chord = None
+        self.update()
+
+    def set_chord(self, chord: Chord | None):
+        self._active_chord = chord
         self.update()
 
     def set_tuning(self, tuning: GuitarTuning):
@@ -84,6 +93,21 @@ class FretboardWidget(QWidget):
     def set_fingerstyle(self, enabled: bool):
         self._fingerstyle = enabled
         self.update()
+
+    def set_capo_fret(self, fret: int):
+        if not 0 <= fret <= 12:
+            raise ValueError("Capo fret must be between 0 and 12")
+        self._capo_fret = fret
+        if self._slide_fret is not None and self._slide_fret < fret:
+            self._slide_fret = fret
+        self.update()
+
+    def _note_name(self, pitch_class: int) -> str:
+        if self._scale is not None:
+            for note in self._scale.notes:
+                if note.pitch_class == pitch_class:
+                    return note.name
+        return CHROMATIC_SHARPS[pitch_class]
 
     # -- Paint ---------------------------------------------------------------
 
@@ -160,7 +184,8 @@ class FretboardWidget(QWidget):
             pima_letters = {0: "P", 1: "P", 2: "P", 3: "I", 4: "M", 5: "A"}
             for si in range(num_strings):
                 y = fb_y + (num_strings - 1 - si) * string_spacing
-                name = CHROMATIC_SHARPS[self._tuning.pitches[si] % 12]
+                sounding_pc = (self._tuning.pitches[si] + self._capo_fret) % 12
+                name = self._note_name(sounding_pc)
                 fm = QFontMetricsF(label_font)
                 if self._fingerstyle:
                     # Draw note name
@@ -193,7 +218,7 @@ class FretboardWidget(QWidget):
                 chord_font = QFont("sans-serif", max(6, int(min(string_spacing * 0.22, 9))))
                 chord_font_bold = QFont("sans-serif", max(6, int(min(string_spacing * 0.22, 9))), QFont.Weight.Bold)
                 fret_slot_w = fret_xs[1] - fret_xs[0] if len(fret_xs) > 1 else 40
-                for f in range(0, NUM_FRETS + 1):
+                for f in range(self._capo_fret, NUM_FRETS + 1):
                     pitches_at_fret = [op + f for op in self._tuning.pitches]
                     chord_name = identify_chord(pitches_at_fret)
                     if f == 0:
@@ -215,8 +240,15 @@ class FretboardWidget(QWidget):
                 for f in range(1, NUM_FRETS + 1):
                     mid_x = (fret_xs[f - 1] + fret_xs[f]) / 2
                     nfm = QFontMetricsF(num_font)
+                    color = QColor(COL_FRET_NUM)
+                    if f < self._capo_fret:
+                        color.setAlphaF(0.28)
+                    p.setPen(color)
                     p.drawText(QRectF(mid_x - 10, fb_y + fb_h + 6, 20, nfm.height()),
                                 Qt.AlignmentFlag.AlignCenter, str(f))
+
+            if self._capo_fret:
+                self._draw_capo(p, fb_y, fb_h, fret_xs)
 
             # Slide bar and note circles at selected fret
             if self._slide_mode and self._slide_fret is not None:
@@ -268,7 +300,7 @@ class FretboardWidget(QWidget):
                     # Label
                     p.setPen(QColor(COL_NOTE_TEXT if in_scale else "#333333"))
                     p.drawText(QRectF(x - note_r, y - note_r, note_r * 2, note_r * 2),
-                                Qt.AlignmentFlag.AlignCenter, CHROMATIC_SHARPS[pc])
+                                Qt.AlignmentFlag.AlignCenter, self._note_name(pc))
 
             # Fingerstyle bass/treble separator
             if self._fingerstyle and num_strings >= 4:
@@ -287,8 +319,9 @@ class FretboardWidget(QWidget):
     def _draw_notes(self, p: QPainter, fb_x, fb_y, fb_w, fb_h,
                      fret_xs, string_spacing, num_strings):
         scale = self._scale
-        highlighted = scale.pitch_classes
-        root_pc = scale.root.pitch_class
+        chord = self._active_chord
+        highlighted = chord.pitch_classes if chord is not None else scale.pitch_classes
+        root_pc = chord.root.pitch_class if chord is not None else scale.root.pitch_class
 
         note_r = min(string_spacing * 0.35, (fret_xs[1] - fret_xs[0]) * 0.3, 14)
         note_font = QFont("sans-serif", max(7, int(note_r * 0.85)), QFont.Weight.Bold)
@@ -297,7 +330,7 @@ class FretboardWidget(QWidget):
         # Compute CAGED zones if enabled
         caged_zones = None
         if self._caged_enabled:
-            caged_zones = get_caged_zones(root_pc, self._tuning.pitches)
+            caged_zones = get_caged_zones(scale.root.pitch_class, self._tuning.pitches)
             # Draw shape labels above fretboard
             self._draw_caged_labels(p, fb_y, fret_xs, caged_zones)
 
@@ -305,7 +338,7 @@ class FretboardWidget(QWidget):
             open_pitch = self._tuning.pitches[si]
             y = fb_y + (num_strings - 1 - si) * string_spacing
 
-            for fret in range(0, NUM_FRETS + 1):
+            for fret in range(self._capo_fret, NUM_FRETS + 1):
                 pc = note_at_fret(open_pitch, fret)
                 if pc not in highlighted:
                     continue
@@ -347,7 +380,7 @@ class FretboardWidget(QWidget):
                     interval = (pc - root_pc) % 12
                     text = DEGREE_LABELS.get(interval, "?")
                 else:
-                    text = CHROMATIC_SHARPS[pc]
+                    text = self._note_name(pc)
 
                 text_color = QColor(COL_NOTE_TEXT)
                 if caged_zones and self._caged_shape is not None and shape != self._caged_shape:
@@ -355,6 +388,25 @@ class FretboardWidget(QWidget):
                 p.setPen(text_color)
                 p.drawText(QRectF(x - note_r, y - note_r, note_r * 2, note_r * 2),
                             Qt.AlignmentFlag.AlignCenter, text)
+
+    def _draw_capo(self, p: QPainter, fb_y: float, fb_h: float,
+                   fret_xs: list[float]):
+        """Shade inaccessible frets and draw the capo at its physical fret."""
+        fret = self._capo_fret
+        capo_x = (fret_xs[fret - 1] + fret_xs[fret]) / 2
+
+        blocked = QColor(COL_BLOCKED)
+        blocked.setAlphaF(0.72)
+        p.fillRect(
+            QRectF(fret_xs[0], fb_y - 5, capo_x - fret_xs[0] - 4, fb_h + 10),
+            blocked,
+        )
+
+        p.setBrush(QBrush(QColor(COL_CAPO)))
+        p.setPen(QPen(QColor("#7b8490"), 1))
+        p.drawRoundedRect(QRectF(capo_x - 4, fb_y - 12, 8, fb_h + 24), 4, 4)
+        p.drawEllipse(QRectF(capo_x - 6, fb_y - 17, 12, 12))
+        p.drawEllipse(QRectF(capo_x - 6, fb_y + fb_h + 5, 12, 12))
 
     def _draw_caged_labels(self, p: QPainter, fb_y: float,
                             fret_xs: list[float],
@@ -375,6 +427,8 @@ class FretboardWidget(QWidget):
             color = QColor(CAGED_COLORS[name])
             if self._caged_shape is not None and name != self._caged_shape:
                 color.setAlphaF(0.3)
+            if center < self._capo_fret:
+                color.setAlphaF(0.15)
             p.setPen(color)
             p.drawText(QRectF(x - 12, fb_y - 20, 24, 16),
                         Qt.AlignmentFlag.AlignCenter, name)
@@ -392,6 +446,6 @@ class FretboardWidget(QWidget):
         if fb_w <= 0:
             return
         rel = (x - fb_x) / fb_w * NUM_FRETS
-        fret = max(0, min(NUM_FRETS, round(rel)))
+        fret = max(self._capo_fret, min(NUM_FRETS, round(rel)))
         self._slide_fret = fret
         self.update()

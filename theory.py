@@ -6,7 +6,7 @@ and GuitarTuning types plus all circle-of-fifths data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Chromatic pitch classes
@@ -90,7 +90,7 @@ ENHARMONIC_MINOR = {5: "Abm", 6: "Ebm"}  # G#m/Abm, D#m/Ebm
 
 # Key signature: position -> (sharps, flats)
 KEY_SIGNATURES = {
-    0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 0), 4: (4, 0), 5: (5, 0),
+    0: (0, 0), 1: (1, 0), 2: (2, 0), 3: (3, 0), 4: (4, 0), 5: (5, 7),
     6: (6, 6),  # enharmonic pair
     7: (0, 5), 8: (0, 4), 9: (0, 3), 10: (0, 2), 11: (0, 1),
 }
@@ -172,23 +172,119 @@ class Scale:
 # Chords
 # ---------------------------------------------------------------------------
 
-# Quality of each diatonic degree in major (Ionian)
-_MAJOR_QUALITIES = {
-    1: "major", 2: "minor", 3: "minor", 4: "major",
-    5: "major", 6: "minor", 7: "dim",
-}
-
-_ROMAN_MAJOR = {
-    1: "I", 2: "ii", 3: "iii", 4: "IV", 5: "V", 6: "vi", 7: "vii°",
-}
-
-
 @dataclass(frozen=True)
 class Chord:
     root: Note
     quality: str
     roman: str
     degree: int
+    notes: tuple[Note, ...] = ()
+
+    @property
+    def name(self) -> str:
+        suffix = {
+            "major": "",
+            "minor": "m",
+            "dim": "dim",
+            "aug": "aug",
+        }.get(self.quality, self.quality)
+        return f"{self.root.name}{suffix}"
+
+    @property
+    def pitch_classes(self) -> set[int]:
+        return {note.pitch_class for note in self.notes}
+
+
+_ROMAN_DEGREES = ("I", "II", "III", "IV", "V", "VI", "VII")
+
+
+def _roman_for_quality(degree: int, quality: str) -> str:
+    numeral = _ROMAN_DEGREES[degree - 1]
+    if quality in ("minor", "dim"):
+        numeral = numeral.lower()
+    if quality == "dim":
+        numeral += "°"
+    elif quality == "aug":
+        numeral += "+"
+    return numeral
+
+
+def _triad_quality(root: Note, third: Note, fifth: Note) -> str:
+    intervals = {
+        (third.pitch_class - root.pitch_class) % 12,
+        (fifth.pitch_class - root.pitch_class) % 12,
+    }
+    return {
+        frozenset((4, 7)): "major",
+        frozenset((3, 7)): "minor",
+        frozenset((3, 6)): "dim",
+        frozenset((4, 8)): "aug",
+    }.get(frozenset(intervals), "unknown")
+
+
+@dataclass(frozen=True)
+class HarmonyState:
+    """One authoritative harmonic context shared by every visualization."""
+
+    root: Note
+    mode: str
+    scale: Scale
+    chords: tuple[Chord, ...]
+
+    @staticmethod
+    def build(root_name: str, mode: str) -> HarmonyState:
+        scale = Scale.build(root_name, mode)
+        chords = []
+        for index, root in enumerate(scale.notes):
+            notes = (
+                root,
+                scale.notes[(index + 2) % len(scale.notes)],
+                scale.notes[(index + 4) % len(scale.notes)],
+            )
+            quality = _triad_quality(*notes)
+            degree = index + 1
+            chords.append(Chord(
+                root=root,
+                quality=quality,
+                roman=_roman_for_quality(degree, quality),
+                degree=degree,
+                notes=notes,
+            ))
+        return HarmonyState(scale.root, mode, scale, tuple(chords))
+
+    @property
+    def signature_label(self) -> str:
+        sharps = sum(note.name.count("#") for note in self.scale.notes)
+        flats = sum(note.name.count("b") for note in self.scale.notes)
+        if sharps and not flats:
+            return f"{sharps} sharp{'s' if sharps != 1 else ''}"
+        if flats and not sharps:
+            return f"{flats} flat{'s' if flats != 1 else ''}"
+        if not sharps and not flats:
+            return "no sharps or flats"
+        return f"{sharps} sharps / {flats} flats"
+
+    @property
+    def tonic_quality(self) -> str:
+        return self.chords[0].quality
+
+
+def circle_position_for_pitch(pitch_class: int, minor_ring: bool = False) -> int:
+    """Return the circle position for a pitch on the requested ring."""
+    names = CIRCLE_MINOR_NAMES if minor_ring else CIRCLE_MAJOR_NAMES
+    for position, name in enumerate(names):
+        pitch_name = name[:-1] if minor_ring else name
+        if Note.from_name(pitch_name).pitch_class == pitch_class:
+            return position
+    raise ValueError(f"No circle position for pitch class {pitch_class}")
+
+
+def circle_segment_for_chord(chord: Chord) -> tuple[int, bool] | None:
+    """Return the exact two-ring segment for a major or minor chord."""
+    if chord.quality not in ("major", "minor"):
+        return None
+    minor_ring = chord.quality == "minor"
+    return circle_position_for_pitch(chord.root.pitch_class, minor_ring), minor_ring
 
 
 # ---------------------------------------------------------------------------
@@ -211,17 +307,15 @@ class Progression:
     name: str
     degrees: list[int]
 
-    def in_key(self, key_root: str, key_position: int) -> list[Chord]:
-        """Return concrete chords for this progression in the given key."""
-        scale = Scale.build(key_root, "Ionian")
-        chords = []
-        for deg in self.degrees:
-            d = ((deg - 1) % 7) + 1
-            note = scale.notes[d - 1]
-            quality = _MAJOR_QUALITIES.get(d, "major")
-            roman = _ROMAN_MAJOR.get(d, str(d))
-            chords.append(Chord(note, quality, roman, d))
-        return chords
+    def in_harmony(self, harmony: HarmonyState) -> list[Chord]:
+        """Return the progression's chords in the active modal harmony."""
+        return [harmony.chords[(degree - 1) % 7] for degree in self.degrees]
+
+    def in_key(self, key_root: str, key_position: int,
+               mode: str = "Ionian") -> list[Chord]:
+        """Compatibility helper for callers that have not built a state yet."""
+        del key_position
+        return self.in_harmony(HarmonyState.build(key_root, mode))
 
     def circle_positions(self, key_position: int) -> list[int]:
         """Return the circle positions for each chord in this progression."""
@@ -290,6 +384,13 @@ CAGED_COLORS = {
 }
 
 CAGED_TUNINGS = {"Standard (EADGBE)", "Half Step Down"}
+SLIDE_TUNINGS = {
+    "DADGAD",
+    "Open G (DGDGBD)",
+    "Open D (DADF#AD)",
+    "Open E (EBEG#BE)",
+    "Open A (EAEAC#E)",
+}
 
 
 def get_caged_zones(
@@ -363,37 +464,26 @@ def identify_chord(pitches: list[int]) -> str:
     unique_pcs = {p % 12 for p in pitches}
     bass_pc = pitches[0] % 12
 
-    best: tuple[int, str, int, int] | None = None  # (score, name, root, extra)
+    best: tuple[int, str, int] | None = None  # (score, suffix, root)
 
     for root_pc in unique_pcs:
         intervals = {(pc - root_pc) % 12 for pc in unique_pcs}
         for suffix, template in CHORD_TEMPLATES.items():
-            if not template.issubset(intervals):
+            if template != intervals:
                 continue
-            extra = len(intervals) - len(template)
-            score = 0
-            if root_pc == bass_pc:
-                score += 5
-            # Prefer simpler templates (fewer notes = fewer extra)
-            score -= extra
-            # Prefer simpler quality (fewer template notes)
-            score -= len(template)
+            score = 1 if root_pc == bass_pc else 0
             if best is None or score > best[0]:
-                best = (score, suffix, root_pc, extra)
+                best = (score, suffix, root_pc)
 
     if best is None:
         return "?"
 
-    _, suffix, root_pc, _ = best
+    _, suffix, root_pc = best
     root_name = CHROMATIC_SHARPS[root_pc]
     chord_name = root_name + suffix
 
-    # Only show slash notation when bass is NOT a chord tone
     if root_pc != bass_pc:
-        template = CHORD_TEMPLATES[suffix]
-        bass_interval = (bass_pc - root_pc) % 12
-        if bass_interval not in template:
-            bass_name = CHROMATIC_SHARPS[bass_pc]
-            chord_name += "/" + bass_name
+        bass_name = CHROMATIC_SHARPS[bass_pc]
+        chord_name += "/" + bass_name
 
     return chord_name

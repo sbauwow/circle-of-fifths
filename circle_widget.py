@@ -11,9 +11,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from theory import (
-    CIRCLE_MAJOR_NAMES, CIRCLE_MINOR_NAMES, DEGREE_FIFTH_OFFSET,
-    ENHARMONIC_MAJOR, ENHARMONIC_MINOR, KEY_SIGNATURES, MODE_INTERVALS,
-    MODE_NAMES, Note, Progression, Scale, degree_to_circle_position,
+    CIRCLE_MAJOR_NAMES, CIRCLE_MINOR_NAMES, ENHARMONIC_MAJOR,
+    ENHARMONIC_MINOR, KEY_SIGNATURES, Chord, HarmonyState, Progression,
+    circle_position_for_pitch, circle_segment_for_chord,
 )
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ COL_SELECTED_DIM = "#1a6e96"
 COL_RELATIVE = "#29b6f6"
 COL_MODE_HIGHLIGHT = "#ffb74d"
 COL_PROGRESSION = "#f06292"
+COL_ACTIVE_CHORD = "#ec6fa4"
 COL_BORDER = "#22334a"
 COL_TEXT = "#e0e0e0"
 COL_TEXT_DIM = "#90a4ae"
@@ -38,7 +39,9 @@ class CircleOfFifthsWidget(QWidget):
     """Interactive circle-of-fifths visualization."""
 
     key_selected = Signal(str, bool)   # (key_name, is_minor)
-    scale_changed = Signal(object)     # list[Note]
+    scale_changed = Signal(object)     # Scale; retained for API compatibility
+    harmony_changed = Signal(object)   # HarmonyState
+    mode_resolved = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,14 +52,23 @@ class CircleOfFifthsWidget(QWidget):
         self._selected_minor: bool = False
         self._mode: str = "Ionian"
         self._progression: Progression | None = None
-        self._highlighted_positions: set[int] = set()
+        self._harmony: HarmonyState | None = None
+        self._diatonic_segments: set[tuple[int, bool]] = set()
+        self._active_segment: tuple[int, bool] | None = None
 
     # -- Public API ----------------------------------------------------------
 
     def set_mode(self, mode: str):
         if mode == self._mode:
             return
+        root_name = self._selected_root_name()
         self._mode = mode
+        if root_name is not None:
+            state = HarmonyState.build(root_name, mode)
+            segment = circle_segment_for_chord(state.chords[0])
+            if segment is None:
+                segment = (circle_position_for_pitch(state.root.pitch_class), False)
+            self._selected_pos, self._selected_minor = segment
         self._recompute()
         self.update()
 
@@ -64,50 +76,58 @@ class CircleOfFifthsWidget(QWidget):
         self._progression = prog
         self.update()
 
+    def set_active_chord(self, chord: Chord | None):
+        self._active_segment = (
+            circle_segment_for_chord(chord) if chord is not None else None)
+        self.update()
+
+    def select_key(self, root_name: str, mode: str = "Ionian"):
+        state = HarmonyState.build(root_name, mode)
+        segment = circle_segment_for_chord(state.chords[0])
+        if segment is None:
+            segment = (circle_position_for_pitch(state.root.pitch_class), False)
+        self._selected_pos, self._selected_minor = segment
+        self._mode = mode
+        self.mode_resolved.emit(mode)
+        self._recompute()
+        self.update()
+
     # -- Selection -----------------------------------------------------------
 
     def _select(self, pos: int, minor: bool):
         self._selected_pos = pos
         self._selected_minor = minor
+        resolved_mode = "Aeolian" if minor else "Ionian"
+        if self._mode != resolved_mode:
+            self._mode = resolved_mode
+            self.mode_resolved.emit(resolved_mode)
         name = CIRCLE_MINOR_NAMES[pos] if minor else CIRCLE_MAJOR_NAMES[pos]
         self.key_selected.emit(name, minor)
         self._recompute()
         self.update()
 
-    def _recompute(self):
-        """Recompute highlighted positions and emit scale_changed."""
+    def _selected_root_name(self) -> str | None:
         if self._selected_pos is None:
-            self._highlighted_positions = set()
+            return None
+        if self._selected_minor:
+            return CIRCLE_MINOR_NAMES[self._selected_pos][:-1]
+        return CIRCLE_MAJOR_NAMES[self._selected_pos]
+
+    def _recompute(self):
+        """Build the shared harmony and derive exact major/minor segments."""
+        if self._selected_pos is None:
+            self._harmony = None
+            self._diatonic_segments = set()
+            self._active_segment = None
             return
-        pos = self._selected_pos
-        minor = self._selected_minor
 
-        if minor:
-            root_name = CIRCLE_MINOR_NAMES[pos].replace("m", "")
-        else:
-            root_name = CIRCLE_MAJOR_NAMES[pos]
-
-        # Build the scale for current mode
-        mode = self._mode
-        if minor and mode == "Ionian":
-            mode = "Aeolian"  # natural minor
-
-        try:
-            scale = Scale.build(root_name, mode)
-        except (ValueError, KeyError):
-            scale = Scale.build(root_name, "Ionian")
-
-        self.scale_changed.emit(scale)
-
-        # Map scale notes onto circle positions
-        self._highlighted_positions = set()
-        for note in scale.notes:
-            # Find which circle position this pitch class occupies
-            for i, mname in enumerate(CIRCLE_MAJOR_NAMES):
-                mpc = Note.from_name(mname).pitch_class
-                if mpc == note.pitch_class:
-                    self._highlighted_positions.add(i)
-                    break
+        self._harmony = HarmonyState.build(self._selected_root_name(), self._mode)
+        segments = (
+            circle_segment_for_chord(chord) for chord in self._harmony.chords)
+        self._diatonic_segments = {segment for segment in segments if segment is not None}
+        self._active_segment = None
+        self.harmony_changed.emit(self._harmony)
+        self.scale_changed.emit(self._harmony.scale)
 
     # -- Geometry helpers ----------------------------------------------------
 
@@ -192,13 +212,15 @@ class CircleOfFifthsWidget(QWidget):
     def _segment_color(self, pos: int, is_minor: bool) -> str:
         """Determine fill color for a segment."""
         sel = self._selected_pos
+        if self._active_segment == (pos, is_minor):
+            return COL_ACTIVE_CHORD
         if sel is not None and pos == sel:
             if is_minor == self._selected_minor:
                 return COL_SELECTED
             else:
                 return COL_RELATIVE  # relative major/minor
 
-        if pos in self._highlighted_positions:
+        if (pos, is_minor) in self._diatonic_segments:
             return COL_MODE_HIGHLIGHT
 
         return COL_MINOR_SEG if is_minor else COL_MAJOR_SEG
@@ -222,7 +244,8 @@ class CircleOfFifthsWidget(QWidget):
         p.setFont(font)
 
         # Choose text color (dark on bright backgrounds)
-        is_bright = (color in (COL_SELECTED, COL_MODE_HIGHLIGHT, COL_RELATIVE))
+        is_bright = color in (
+            COL_SELECTED, COL_MODE_HIGHLIGHT, COL_RELATIVE, COL_ACTIVE_CHORD)
         p.setPen(QColor("#1a1a2e") if is_bright else QColor(COL_TEXT))
 
         text = label
@@ -271,10 +294,10 @@ class CircleOfFifthsWidget(QWidget):
                         Qt.AlignmentFlag.AlignCenter, "Click\na key")
             return
 
-        pos = self._selected_pos
-        minor = self._selected_minor
-        name = CIRCLE_MINOR_NAMES[pos] if minor else CIRCLE_MAJOR_NAMES[pos]
-        quality = "Minor" if minor else "Major"
+        harmony = self._harmony
+        if harmony is None:
+            return
+        name = harmony.chords[0].name
 
         # Key name (large)
         big = QFont("sans-serif", max(14, int(r * 0.45)), QFont.Weight.Bold)
@@ -287,20 +310,12 @@ class CircleOfFifthsWidget(QWidget):
         med = QFont("sans-serif", max(9, int(r * 0.2)))
         p.setFont(med)
         p.setPen(QColor(COL_TEXT))
-        mode_text = self._mode
+        mode_text = harmony.mode
         p.drawText(QRectF(cx - r, cy - r * 0.05, r * 2, r * 0.35),
                     Qt.AlignmentFlag.AlignCenter, mode_text)
 
         # Key signature (small)
-        sharps, flats = KEY_SIGNATURES[pos]
-        if sharps and not flats:
-            sig = f"{sharps} sharp{'s' if sharps > 1 else ''}"
-        elif flats and not sharps:
-            sig = f"{flats} flat{'s' if flats > 1 else ''}"
-        elif sharps and flats:
-            sig = f"{sharps}\u266f / {flats}\u266d"
-        else:
-            sig = "no sharps/flats"
+        sig = harmony.signature_label
 
         small = QFont("sans-serif", max(8, int(r * 0.16)))
         p.setFont(small)
@@ -311,29 +326,33 @@ class CircleOfFifthsWidget(QWidget):
     def _draw_progression(self, p: QPainter, cx, cy, outer_r, mid_r):
         """Draw arcs connecting chord positions for the active progression."""
         prog = self._progression
-        pos = self._selected_pos
-        if prog is None or pos is None:
+        harmony = self._harmony
+        if prog is None or harmony is None:
             return
 
-        positions = prog.circle_positions(pos)
-        if len(positions) < 2:
+        chords = prog.in_harmony(harmony)
+        if len(chords) < 2:
             return
-
-        r = (outer_r + mid_r) / 2  # radius for arc points
 
         pen = QPen(QColor(COL_PROGRESSION), 3)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
 
-        for idx in range(len(positions) - 1):
-            a = positions[idx]
-            b = positions[idx + 1]
+        for idx in range(len(chords) - 1):
+            segment_a = circle_segment_for_chord(chords[idx])
+            segment_b = circle_segment_for_chord(chords[idx + 1])
+            if segment_a is None or segment_b is None:
+                continue
+            a, a_minor = segment_a
+            b, b_minor = segment_b
 
             angle_a = self._mid_angle_rad(a)
             angle_b = self._mid_angle_rad(b)
 
-            pt_a = self._point_at(cx, cy, r, angle_a)
-            pt_b = self._point_at(cx, cy, r, angle_b)
+            major_r = (outer_r + mid_r) / 2
+            minor_r = mid_r * 0.86
+            pt_a = self._point_at(cx, cy, minor_r if a_minor else major_r, angle_a)
+            pt_b = self._point_at(cx, cy, minor_r if b_minor else major_r, angle_b)
 
             # Control point toward center for curved arc
             mid_x = (pt_a.x() + pt_b.x()) / 2
