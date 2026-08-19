@@ -4,10 +4,13 @@
 import sys
 
 from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel,
-    QMainWindow, QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QLabel, QMainWindow, QScrollArea,
+    QScroller, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
+
+from flow_layout import FlowLayout
 
 from theory import (
     CAGED_TUNINGS, MODE_NAMES, PROGRESSIONS, SLIDE_TUNINGS, TUNING_NAMES,
@@ -32,7 +35,8 @@ QComboBox {
     padding: 4px 8px;
     color: #e0e0e0;
     border-radius: 3px;
-    min-width: 120px;
+    min-width: 96px;
+    min-height: 26px;
 }
 QComboBox::drop-down {
     border: none;
@@ -120,7 +124,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Circle of Fifths")
-        self.setMinimumSize(900, 750)
+        # Phosh gives the window 360x720 logical points (720x1440 panel at
+        # 2x scale), so the minimum has to fit inside that.
+        self.setMinimumSize(320, 480)
         self.resize(1000, 800)
         self.setStyleSheet(STYLESHEET)
         self.harmony: HarmonyState | None = None
@@ -144,9 +150,19 @@ class MainWindow(QMainWindow):
         self.chord_strip = DiatonicChordStrip()
         layout.addWidget(self.chord_strip)
 
-        # Fretboard
+        # Fretboard: keep its full width for legibility and scroll it
+        # horizontally rather than widening the window past the screen.
         self.fretboard = FretboardWidget()
-        layout.addWidget(self.fretboard, stretch=0)
+        fret_scroll = QScrollArea()
+        fret_scroll.setWidget(self.fretboard)
+        fret_scroll.setWidgetResizable(True)
+        fret_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        fret_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        fret_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        fret_scroll.setFixedHeight(self.fretboard.minimumHeight() + 14)
+        QScroller.grabGesture(fret_scroll.viewport(),
+                              QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        layout.addWidget(fret_scroll, stretch=0)
 
         # Status bar
         self.status_label = QLabel("  Click a key on the circle to begin")
@@ -157,77 +173,58 @@ class MainWindow(QMainWindow):
         self.circle.select_key("C", "Ionian")
 
     def _build_toolbar(self) -> QWidget:
+        # One wrapping row (FlowLayout): a single line on a desktop window, and
+        # as many rows as it needs on a phone. Labels group the controls.
         bar = QWidget()
-        bar.setFixedHeight(72)
-        outer = QVBoxLayout(bar)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
+        bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        layout = FlowLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        primary = QHBoxLayout()
-        primary.setContentsMargins(0, 0, 0, 0)
-        primary.setSpacing(8)
-        outer.addLayout(primary)
-
-        # Mode
-        primary.addWidget(QLabel("Mode:"))
+        layout.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(MODE_NAMES)
-        primary.addWidget(self.mode_combo)
+        layout.addWidget(self.mode_combo)
 
-        # Progression
-        primary.addWidget(QLabel("Progression:"))
+        layout.addWidget(QLabel("Progression:"))
         self.prog_combo = QComboBox()
         self.prog_combo.addItem("(none)")
         for prog in PROGRESSIONS:
             self.prog_combo.addItem(prog.name)
         self.prog_combo.setMinimumWidth(150)
-        primary.addWidget(self.prog_combo)
+        layout.addWidget(self.prog_combo)
 
-        # Tuning
-        primary.addWidget(QLabel("Tuning:"))
+        layout.addWidget(QLabel("Tuning:"))
         self.tuning_combo = QComboBox()
         self.tuning_combo.addItems(TUNING_NAMES)
         self.tuning_combo.setMinimumWidth(175)
-        primary.addWidget(self.tuning_combo)
-        primary.addStretch()
+        layout.addWidget(self.tuning_combo)
 
-        display = QHBoxLayout()
-        display.setContentsMargins(0, 0, 0, 0)
-        display.setSpacing(12)
-        outer.addLayout(display)
-        display.addWidget(QLabel("Fretboard:"))
-
-        # Show degrees
+        layout.addWidget(QLabel("Fretboard:"))
         self.degree_check = QCheckBox("Degrees")
-        display.addWidget(self.degree_check)
+        layout.addWidget(self.degree_check)
 
-        # CAGED overlay
         self.caged_check = QCheckBox("CAGED")
-        display.addWidget(self.caged_check)
+        layout.addWidget(self.caged_check)
         self.caged_combo = QComboBox()
         self.caged_combo.addItems(["All", "C", "A", "G", "E", "D"])
         self.caged_combo.setVisible(False)
-        display.addWidget(self.caged_combo)
+        layout.addWidget(self.caged_combo)
 
-        # Slide mode
         self.slide_check = QCheckBox("Slide")
-        display.addWidget(self.slide_check)
+        layout.addWidget(self.slide_check)
 
-        # Fingerstyle mode
         self.fingerstyle_check = QCheckBox("Fingerstyle")
-        display.addWidget(self.fingerstyle_check)
+        layout.addWidget(self.fingerstyle_check)
 
-        # Capo mode
         self.capo_check = QCheckBox("Capo")
-        display.addWidget(self.capo_check)
+        layout.addWidget(self.capo_check)
         self.capo_spin = QSpinBox()
         self.capo_spin.setRange(1, 12)
         self.capo_spin.setPrefix("Fret ")
         self.capo_spin.setEnabled(False)
         self.capo_spin.setToolTip("Physical fret where the capo is placed")
-        display.addWidget(self.capo_spin)
+        layout.addWidget(self.capo_spin)
 
-        display.addStretch()
         return bar
 
     def _connect_signals(self):

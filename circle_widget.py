@@ -46,7 +46,7 @@ class CircleOfFifthsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(240, 240)
 
         self._selected_pos: int | None = None
         self._selected_minor: bool = False
